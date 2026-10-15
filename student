@@ -1,0 +1,127 @@
+"""
+student_analytics.py
+Student Analytics Management using Python + AI (scikit-learn)
+
+Install:  pip install pandas numpy scikit-learn
+Run:      python student_analytics.py                 # uses sample data
+          python student_analytics.py students.csv    # uses your CSV
+"""
+import sys
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import accuracy_score, classification_report
+
+SUBJECTS = ["DAA", "CN", "DevOps", "DA", "ES"]
+PASS_MARK = 40
+FEATURES = ["attendance", "internal_marks", "assignment_score"]
+
+
+def make_sample_data(n=200, seed=42):
+    """Generate realistic sample student data."""
+    rng = np.random.default_rng(seed)
+    df = pd.DataFrame({
+        "student_id": [f"22CS{i:03d}" for i in range(1, n + 1)],
+        "name": [f"Student {i}" for i in range(1, n + 1)],
+        "attendance": rng.uniform(50, 100, n).round(1),
+        "internal_marks": rng.uniform(5, 30, n).round(1),
+        "assignment_score": rng.uniform(0, 10, n).round(1),
+    })
+    for s in SUBJECTS:
+        score = 0.2 * df["attendance"] + 1.5 * df["internal_marks"] + 2 * df["assignment_score"]
+        df[s] = (score + rng.normal(0, 8, n)).clip(0, 100).round(1)
+    return df
+
+
+def add_analytics(df):
+    """Compute totals, percentage, backlogs, result and grade."""
+    df = df.copy()
+    df["total"] = df[SUBJECTS].sum(axis=1)
+    df["percentage"] = (df["total"] / (len(SUBJECTS) * 100) * 100).round(2)
+    df["backlogs"] = (df[SUBJECTS] < PASS_MARK).sum(axis=1)
+    df["result"] = np.where(df["backlogs"] == 0, "PASS", "FAIL")
+    df["grade"] = pd.cut(df["percentage"], bins=[-1, 40, 50, 60, 70, 101],
+                         labels=["F", "C", "B", "A", "A+"])
+    return df
+
+
+def subject_report(df):
+    """Mean/min/max and pass rate for each subject."""
+    stats = df[SUBJECTS].agg(["mean", "min", "max"]).round(1).T
+    stats["pass_rate_%"] = ((df[SUBJECTS] >= PASS_MARK).mean() * 100).round(1)
+    return stats
+
+
+def train_risk_model(df):
+    """Random Forest: predicts whether a student is likely to fail."""
+    X = df[FEATURES]
+    y = (df["result"] == "FAIL").astype(int)
+    X_tr, X_te, y_tr, y_te = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y)
+
+    model = RandomForestClassifier(n_estimators=200, class_weight="balanced",
+                                   random_state=42)
+    model.fit(X_tr, y_tr)
+
+    pred = model.predict(X_te)
+    print(f"Hold-out accuracy : {accuracy_score(y_te, pred) * 100:.2f}%")
+    print(f"5-fold CV accuracy: {cross_val_score(model, X, y, cv=5).mean() * 100:.2f}%")
+    print(classification_report(y_te, pred, zero_division=0))
+    return model
+
+
+def cluster_students(df, k=3):
+    """KMeans: groups students by performance profile."""
+    cols = ["percentage", "attendance", "backlogs"]
+    scaled = StandardScaler().fit_transform(df[cols])
+    df = df.copy()
+    df["cluster"] = KMeans(n_clusters=k, n_init=10, random_state=42).fit_predict(scaled)
+
+    # Name clusters from best to worst by average percentage
+    order = df.groupby("cluster")["percentage"].mean().sort_values(ascending=False).index
+    tags = ["High performers", "Average", "Needs support"]
+    df["group"] = df["cluster"].map({c: tags[i] for i, c in enumerate(order)})
+    return df
+
+
+def predict_risk(model, df):
+    """Attach an AI risk probability and a flag to every student."""
+    df = df.copy()
+    probs = model.predict_proba(df[FEATURES])[:, 1]
+    df["risk_%"] = (probs * 100).round(1)
+    df["ai_flag"] = np.where(probs >= 0.6, "HIGH RISK",
+                    np.where(probs >= 0.3, "WATCH", "OK"))
+    return df
+
+
+def main(csv_path=None):
+    df = pd.read_csv(csv_path) if csv_path else make_sample_data()
+    df = add_analytics(df)
+
+    print("\n=== Subject-wise analytics ===")
+    print(subject_report(df))
+    print("\nResults:", df["result"].value_counts().to_dict())
+    print("\nGrade distribution:\n", df["grade"].value_counts().sort_index())
+
+    print("\n=== AI model ===")
+    model = train_risk_model(df)
+    df = predict_risk(model, df)
+    df = cluster_students(df)
+
+    print("\n=== Top 5 students ===")
+    print(df.nlargest(5, "percentage")[["name", "percentage", "grade", "group"]]
+            .to_string(index=False))
+
+    print("\n=== High-risk students (top 10) ===")
+    risky = df[df["ai_flag"] == "HIGH RISK"][["student_id", "name", "backlogs", "risk_%"]]
+    print(risky.head(10).to_string(index=False) if not risky.empty else "None")
+
+    df.to_csv("student_analytics_report.csv", index=False)
+    print("\nFull report saved to student_analytics_report.csv")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1] if len(sys.argv) > 1 else None)
